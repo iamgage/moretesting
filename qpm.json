@@ -54,6 +54,11 @@
       "additionalData": {}
     },
     {
+      "id": "custom-types",
+      "versionRange": "^0.18.0",
+      "additionalData": {}
+    },
+    {
       "id": "bsml",
       "versionRange": "^0.4.0",
       "additionalData": {}

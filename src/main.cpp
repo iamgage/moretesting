@@ -18,6 +18,7 @@
 #include "GlobalNamespace/BeatmapKey.hpp"
 #include "GlobalNamespace/BeatmapCharacteristicSO.hpp"
 #include "UnityEngine/GameObject.hpp"
+#include "UnityEngine/UI/Button.hpp"
 #include "UnityEngine/Transform.hpp"
 #include "UnityEngine/MonoBehaviour.hpp"
 #include "UnityEngine/Networking/UnityWebRequest.hpp"
@@ -31,6 +32,7 @@
 #include <cstdio>
 #include <cstring>
 #include <dirent.h>
+#include <sys/stat.h>
 #include <fstream>
 #include <functional>
 #include <memory>
@@ -107,6 +109,10 @@ static struct Config {
     std::string playerId;                   // BeatLeader / ScoreSaber id. Auto-detected on Quest when empty.
     std::string accountType = "auto";       // "auto" (like the PC mod: ScoreSaber if its mod is installed, else BeatLeader), "scoresaber" or "beatleader"
     std::string url = "https://hitbloq.com";
+    // where the panel appears (world space). The panel has a grab handle, but these let you fix a bad default without rebuilding.
+    float posX = 2.45f, posY = 1.55f, posZ = 2.75f, rotY = 30.0f;
+    // PlaylistManager loads playlists from here
+    std::string playlistDir = "/sdcard/ModData/com.beatgames.beatsaber/Mods/PlaylistManager/Playlists";
 } cfg;
 
 static void LoadConfig() {
@@ -119,11 +125,18 @@ static void LoadConfig() {
             cfg.playerId = Str(d, "playerId", cfg.playerId);
             cfg.accountType = Str(d, "accountType", cfg.accountType);
             cfg.url = Str(d, "url", cfg.url);
+            cfg.posX = (float)Num(d, "posX", cfg.posX);
+            cfg.posY = (float)Num(d, "posY", cfg.posY);
+            cfg.posZ = (float)Num(d, "posZ", cfg.posZ);
+            cfg.rotY = (float)Num(d, "rotY", cfg.rotY);
+            cfg.playlistDir = Str(d, "playlistDir", cfg.playlistDir);
         }
     }
     while (!cfg.url.empty() && cfg.url.back() == '/') cfg.url.pop_back();
     std::string out = "{\n  \"playerId\": \"" + cfg.playerId + "\",\n  \"accountType\": \"" + cfg.accountType +
-                      "\",\n  \"url\": \"" + cfg.url + "\"\n}\n";
+                      "\",\n  \"url\": \"" + cfg.url + "\",\n  \"posX\": " + std::to_string(cfg.posX) +
+                      ",\n  \"posY\": " + std::to_string(cfg.posY) + ",\n  \"posZ\": " + std::to_string(cfg.posZ) +
+                      ",\n  \"rotY\": " + std::to_string(cfg.rotY) + ",\n  \"playlistDir\": \"" + cfg.playlistDir + "\"\n}\n";
     std::ofstream o(CONFIG_PATH);
     if (o) o << out;
 }
@@ -241,7 +254,43 @@ static std::string StripTags(const std::string& s) {
 }
 static std::string CurPool() { return S.pools.empty() ? "" : S.pools[S.poolIdx].first; }
 
+// ---- playlist browser state
+static constexpr int POOLS_PER_PAGE = 6;
+static struct Browser {
+    bool open = false, loading = false, loaded = false, downloading = false;
+    std::vector<std::pair<std::string, std::string>> pools; // id, shown name
+    int page = 0;
+} B;
+static std::vector<SafePtrUnity<UnityEngine::GameObject>> browseBtns;
+
+static std::string Trunc(const std::string& s, size_t max) { // UTF-8 safe
+    if (s.size() <= max) return s;
+    size_t n = max;
+    while (n > 0 && (static_cast<unsigned char>(s[n]) & 0xC0) == 0x80) n--;
+    return s.substr(0, n) + "...";
+}
+static int PageCount() { return std::max(1, ((int)B.pools.size() + POOLS_PER_PAGE - 1) / POOLS_PER_PAGE); }
+
+static void ApplyBrowseVisibility() {
+    for (auto& b : browseBtns) if (b) b->SetActive(B.open);
+}
+
 static void Draw() {
+    if (headerText && rankText && statusText && boardText && B.open) {
+        headerText->set_text(SW("<b><color=#ffd42a>Hitbloq</color></b>   playlists (page " + std::to_string(B.page + 1) + "/" + std::to_string(PageCount()) + ")"));
+        rankText->set_text(SW("<color=#aaaaaa>Tap a number to save that pool's playlist</color>"));
+        statusText->set_text(SW(S.status));
+        std::string list;
+        if (B.loading) list = "<color=#aaaaaa>Loading pools...</color>";
+        else if (B.pools.empty()) list = "<color=#aaaaaa>No pools loaded. Press Browse again to retry.</color>";
+        else for (int i = 0; i < POOLS_PER_PAGE; i++) {
+            int idx = B.page * POOLS_PER_PAGE + i;
+            if (idx >= (int)B.pools.size()) break;
+            list += "<pos=0%><color=#ffd42a>" + std::to_string(i + 1) + "</color><pos=7%>" + Trunc(StripTags(B.pools[idx].second), 38) + "\n";
+        }
+        boardText->set_text(SW(list));
+        return;
+    }
     if (!headerText || !rankText || !statusText || !boardText) return;
     std::string h = "<b><color=#ffd42a>Hitbloq</color></b>";
     if (!S.pools.empty()) h += "   pool: <color=#aa6eff>" + CurPool() + "</color> (" + Fmt(S.pools[S.poolIdx].second) + " stars)";
@@ -250,6 +299,109 @@ static void Draw() {
     rankText->set_text(SW(S.rankLine));
     statusText->set_text(SW(S.status));
     boardText->set_text(SW(S.board));
+}
+
+// ------------------------------------------------------------------ playlists (same source as the website: /static/hashlists/<pool>.bplist)
+static void MkDirs(const std::string& path) {
+    std::string cur;
+    for (size_t i = 0; i < path.size(); i++) {
+        cur += path[i];
+        if (path[i] == '/' && cur.size() > 1) mkdir(cur.c_str(), 0777);
+    }
+    mkdir(path.c_str(), 0777);
+}
+
+static std::string SafeFileName(const std::string& in) {
+    std::string o;
+    for (unsigned char c : in) o += (isalnum(c) || c == '-' || c == '_') ? (char)c : '_';
+    return o.empty() ? "pool" : o;
+}
+
+// Saves the pool's playlist where PlaylistManager picks it up. PlaylistManager then offers to download the missing songs.
+static void DownloadPlaylist(const std::string& poolId, const std::string& shownName) {
+    if (poolId.empty()) { S.status = "<color=red>No pool selected.</color>"; Draw(); return; }
+    if (B.downloading) return;
+    B.downloading = true;
+    S.status = "Downloading playlist...";
+    Draw();
+    Http(cfg.url + "/static/hashlists/" + UrlEncode(poolId) + ".bplist", [poolId, shownName](long code, std::string body) {
+        B.downloading = false;
+        rapidjson::Document d;
+        auto songs = ParseJson(body, d) && d.IsObject() ? Mem(d, "songs") : nullptr;
+        if (code < 200 || code >= 300 || !songs || !songs->IsArray()) {
+            LOG("playlist download failed for {} (http {}, {} bytes)", poolId, code, body.size());
+            S.status = "<color=red>Could not download that playlist.</color>";
+            Draw(); return;
+        }
+        MkDirs(cfg.playlistDir);
+        std::string path = cfg.playlistDir + "/Hitbloq_" + SafeFileName(poolId) + ".bplist";
+        std::ofstream o(path, std::ios::binary | std::ios::trunc);
+        if (o) o.write(body.data(), (std::streamsize)body.size());
+        if (!o) {
+            LOG("could not write {}", path);
+            S.status = "<color=red>Could not save the playlist file.</color>";
+            Draw(); return;
+        }
+        o.close();
+        LOG("saved playlist {} ({} maps) to {}", poolId, (int)songs->Size(), path);
+        S.status = "<color=green>Saved " + Trunc(StripTags(shownName), 24) + " (" + std::to_string((int)songs->Size()) +
+                   " maps). Restart the game, then open PlaylistManager.</color>";
+        Draw();
+    });
+}
+
+// The pool list endpoints return slightly different shapes over time, so accept arrays of ids or of objects.
+static void AddPool(std::vector<std::pair<std::string, std::string>>& out, const std::string& id, const std::string& name) {
+    if (id.empty()) return;
+    for (auto& p : out) if (p.first == id) return;
+    out.emplace_back(id, name.empty() ? id : name);
+}
+static void ParsePoolItem(std::vector<std::pair<std::string, std::string>>& out, const JV& e, const char* keyFallback, bool allowString) {
+    if (e.IsString()) { if (allowString) AddPool(out, e.GetString(), e.GetString()); return; }
+    if (!e.IsObject()) return;
+    std::string id = Str(e, "_id");
+    if (id.empty()) id = Str(e, "id");
+    if (id.empty()) id = Str(e, "pool_id");
+    if (id.empty() && keyFallback) id = keyFallback;
+    std::string name = Str(e, "shown_name");
+    if (name.empty()) name = Str(e, "name");
+    AddPool(out, id, name);
+}
+static void ParsePools(const JV& d, std::vector<std::pair<std::string, std::string>>& out) {
+    if (d.IsArray()) { for (auto& e : d.GetArray()) ParsePoolItem(out, e, nullptr, true); return; }
+    if (!d.IsObject()) return;
+    for (auto& m : d.GetObject()) {
+        if (m.value.IsArray()) { for (auto& e : m.value.GetArray()) ParsePoolItem(out, e, nullptr, true); }
+        else if (m.value.IsObject()) ParsePoolItem(out, m.value, m.name.GetString(), false);
+    }
+}
+
+static void LoadPools() {
+    if (B.loading) return;
+    B.loading = true;
+    Draw();
+    Http(cfg.url + "/api/map_pools_detailed", [](long code, std::string body) {
+        rapidjson::Document d;
+        std::vector<std::pair<std::string, std::string>> out;
+        if (ParseJson(body, d)) ParsePools(d, out);
+        B.loading = false;
+        if (out.empty()) {
+            LOG("pool list empty (http {}, {} bytes)", code, body.size());
+            S.status = "<color=red>Could not load the pool list.</color>";
+        } else {
+            B.pools = std::move(out); B.loaded = true; B.page = 0; S.status.clear();
+            LOG("loaded {} pools", (int)B.pools.size());
+        }
+        Draw();
+    });
+}
+
+static void SetBrowse(bool open) {
+    B.open = open;
+    S.status.clear();
+    ApplyBrowseVisibility();
+    if (open && !B.loaded) LoadPools();
+    Draw();
 }
 
 // ------------------------------------------------------------------ user / registration
@@ -467,7 +619,9 @@ static void Refresh() {
 static void BuildUI() {
     if (screen) return;
     int gen = ++uiGen;
-    screen = BSML::Lite::CreateFloatingScreen({96.0f, 66.0f}, {0.0f, 1.6f, 3.3f}, {0.0f, 0.0f, 0.0f}, 0.0f, true);
+    browseBtns.clear();
+    screen = BSML::Lite::CreateFloatingScreen({96.0f, 84.0f}, {cfg.posX, cfg.posY, cfg.posZ}, {0.0f, cfg.rotY, 0.0f}, 0.0f, true);
+    LOG("panel created at ({}, {}, {}) rotY {}", cfg.posX, cfg.posY, cfg.posZ, cfg.rotY);
     auto t = screen->get_transform();
     auto mk = [&](float y, float h, float size, int align) {
         auto tx = BSML::Lite::CreateText(t, "", {0.0f, y}, {90.0f, h});
@@ -478,26 +632,51 @@ static void BuildUI() {
         return tx;
     };
     // TMP alignment ints: 514 = Center, 257 = TopLeft
-    headerText = mk(28.0f, 8.0f, 4.0f, 514);
-    rankText   = mk(21.0f, 6.0f, 3.2f, 514);
-    boardText  = mk(-1.0f, 40.0f, 2.9f, 257);
-    statusText = mk(-22.0f, 6.0f, 3.0f, 514);
-    BSML::Lite::CreateUIButton(t, "Pool", {-30.0f, -29.0f}, {24.0f, 8.0f}, []() {
-        if (S.pools.size() < 2) return;
+    headerText = mk(36.0f, 8.0f, 4.0f, 514);
+    rankText   = mk(29.0f, 6.0f, 3.2f, 514);
+    boardText  = mk(3.0f, 44.0f, 2.9f, 257);
+    statusText = mk(-23.0f, 6.0f, 2.6f, 514);
+
+    // browse row (only visible while browsing pools): < 1 2 3 4 5 6 >
+    auto addBrowse = [&](const char* label, float x, std::function<void()> cb) {
+        auto b = BSML::Lite::CreateUIButton(t, label, {x, -30.0f}, {10.5f, 8.0f}, cb);
+        browseBtns.emplace_back(b->get_gameObject());
+    };
+    addBrowse("<", -40.0f, []() { if (B.page > 0) { B.page--; Draw(); } });
+    for (int n = 0; n < POOLS_PER_PAGE; n++)
+        addBrowse(std::to_string(n + 1).c_str(), -40.0f + 11.43f * (n + 1), [n]() {
+            int i = B.page * POOLS_PER_PAGE + n;
+            if (i < (int)B.pools.size()) DownloadPlaylist(B.pools[i].first, B.pools[i].second);
+        });
+    addBrowse(">", -40.0f + 11.43f * 7, []() { if (B.page + 1 < PageCount()) { B.page++; Draw(); } });
+
+    // main row
+    BSML::Lite::CreateUIButton(t, "Pool", {-38.0f, -38.0f}, {18.0f, 8.0f}, []() {
+        if (B.open || S.pools.size() < 2) return;
         S.poolIdx = (S.poolIdx + 1) % (int)S.pools.size();
         Draw(); ReloadAll();
     });
-    BSML::Lite::CreateUIButton(t, "Global / Around", {0.0f, -29.0f}, {30.0f, 8.0f}, []() {
+    BSML::Lite::CreateUIButton(t, "Global/Near", {-19.0f, -38.0f}, {18.0f, 8.0f}, []() {
+        if (B.open) return;
         S.around = !S.around;
         LoadBoard(++S.version);
     });
-    BSML::Lite::CreateUIButton(t, "Refresh", {30.0f, -29.0f}, {24.0f, 8.0f}, []() { Refresh(); });
+    BSML::Lite::CreateUIButton(t, "Refresh", {0.0f, -38.0f}, {18.0f, 8.0f}, []() { if (!B.open) Refresh(); });
+    BSML::Lite::CreateUIButton(t, "Playlist", {19.0f, -38.0f}, {18.0f, 8.0f}, []() {
+        // same as the PC mod: grab the playlist of the pool that is currently selected
+        if (B.open) return;
+        DownloadPlaylist(CurPool(), CurPool());
+    });
+    BSML::Lite::CreateUIButton(t, "Browse", {38.0f, -38.0f}, {18.0f, 8.0f}, []() { SetBrowse(!B.open); });
+    ApplyBrowseVisibility();
 
     // show the panel only while the level detail view is on screen
     auto poll = std::make_shared<std::function<void()>>();
-    *poll = [poll, gen]() {
+    auto lastVis = std::make_shared<int>(-1);
+    *poll = [poll, gen, lastVis]() {
         if (!screen || gen != uiGen) return;
         bool vis = detailView && detailView->get_gameObject()->get_activeInHierarchy();
+        if (*lastVis != (int)vis) { *lastVis = (int)vis; LOG("panel visible: {}", vis); }
         screen->get_gameObject()->SetActive(vis);
         BSML::MainThreadScheduler::ScheduleAfterTime(0.4f, *poll);
     };

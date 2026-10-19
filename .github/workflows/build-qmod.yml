@@ -1,0 +1,62 @@
+name: Build Hitbloq qmod
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup NDK
+        id: setup-ndk
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r27c
+          add-to-path: true
+
+      - name: Install ninja and PowerShell deps
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Install QPM
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p "$HOME/qpm-bin"
+          gh release download --repo QuestPackageManager/QPM.CLI --pattern '*linux*x64*' --dir "$HOME/qpm-bin"
+          cd "$HOME/qpm-bin"
+          ls -la
+          for z in *.zip; do unzip -o "$z"; done
+          chmod +x qpm* || true
+          echo "$HOME/qpm-bin" >> "$GITHUB_PATH"
+
+      - name: QPM restore
+        run: |
+          qpm --version
+          qpm restore
+
+      - name: Build
+        env:
+          ANDROID_NDK_HOME: ${{ steps.setup-ndk.outputs.ndk-path }}
+        run: qpm s build
+
+      - name: Package qmod
+        run: qpm qmod zip
+
+      - name: Upload qmod
+        uses: actions/upload-artifact@v4
+        with:
+          name: Hitbloq.qmod
+          path: ./*.qmod
+          if-no-files-found: error
+
+      - name: Upload .so (debug)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: libhitbloq-so
+          path: build/*.so
+          if-no-files-found: ignore

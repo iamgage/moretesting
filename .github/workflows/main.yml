@@ -18,16 +18,25 @@ jobs:
           ndk-version: r27c
           add-to-path: true
 
-      - name: Install ninja
+      - name: Install ninja and PowerShell deps
         run: sudo apt-get update && sudo apt-get install -y ninja-build
 
+      - name: Install QPM
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          mkdir -p "$HOME/qpm-bin"
+          gh release download --repo QuestPackageManager/QPM.CLI --pattern '*linux*x64*' --dir "$HOME/qpm-bin"
+          cd "$HOME/qpm-bin"
+          ls -la
+          for z in *.zip; do unzip -o "$z"; done
+          chmod +x qpm* || true
+          echo "$HOME/qpm-bin" >> "$GITHUB_PATH"
+
       - name: QPM restore
-        uses: QuestPackageManager/qpm-action@v1
-        with:
-          workflow_token: ${{ secrets.GITHUB_TOKEN }}
-          restore: true
-          cache: true
-          publish: false
+        run: |
+          qpm --version
+          qpm restore
 
       - name: Build
         env:

@@ -1,0 +1,17 @@
+{
+  "_QPVersion": "0.1.1",
+  "modloader": "Scotland2",
+  "name": "Hitbloq",
+  "id": "hitbloq",
+  "author": "Hitbloq Quest port (original PC mod: PauseChampions & DaFluffyPotato)",
+  "version": "0.1.0",
+  "packageId": "com.beatgames.beatsaber",
+  "packageVersion": "1.40.8_4284",
+  "description": "Hitbloq map pools, ranks and leaderboards for Quest. Works with BeatLeader / ScoreSaber accounts.",
+  "dependencies": [],
+  "modFiles": [],
+  "lateModFiles": ["libhitbloq.so"],
+  "libraryFiles": [],
+  "fileCopies": [],
+  "copyExtensions": []
+}

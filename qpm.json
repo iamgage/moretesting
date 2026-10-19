@@ -1,0 +1,62 @@
+{
+  "version": "0.4.0",
+  "sharedDir": "shared",
+  "dependenciesDir": "extern",
+  "info": {
+    "name": "Hitbloq",
+    "id": "hitbloq",
+    "version": "0.1.0",
+    "url": null,
+    "additionalData": {
+      "overrideSoName": "libhitbloq.so",
+      "cmake": true
+    }
+  },
+  "workspace": {
+    "scripts": {
+      "build": [
+        "pwsh ./scripts/build.ps1"
+      ],
+      "qmod": [
+        "pwsh ./scripts/build.ps1",
+        "qpm qmod zip"
+      ]
+    },
+    "ndk": "^27.2.12479018",
+    "qmodIncludeDirs": [
+      "./build",
+      "./extern/libs"
+    ],
+    "qmodIncludeFiles": [],
+    "qmodOutput": "Hitbloq.qmod"
+  },
+  "dependencies": [
+    {
+      "id": "beatsaber-hook",
+      "versionRange": "^6.0.0",
+      "additionalData": {}
+    },
+    {
+      "id": "bs-cordl",
+      "versionRange": "^4008.0.0",
+      "additionalData": {}
+    },
+    {
+      "id": "scotland2",
+      "versionRange": "^0.1.0",
+      "additionalData": {
+        "includeQmod": false
+      }
+    },
+    {
+      "id": "paper2_scotland2",
+      "versionRange": "^4.0.0",
+      "additionalData": {}
+    },
+    {
+      "id": "bsml",
+      "versionRange": "^0.4.0",
+      "additionalData": {}
+    }
+  ]
+}

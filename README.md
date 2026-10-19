@@ -18,10 +18,11 @@ Or locally: `qpm restore && qpm s qmod`.
 Select a map. The Hitbloq panel appears (grab the handle to move it). Buttons: Pool / Global-Around Me / Refresh.
 After a cleared run the score is refreshed automatically (BeatLeader or ScoreSaber must upload it first).
 
-## Leaderboard switch arrow
-When a map is ranked on Hitbloq, a `Hitbloq >` arrow appears above the leaderboard (its position is found at runtime). Press it to show the Hitbloq panel over the leaderboard, and `< Leaderboard` to go back. If it floats too high or low, change `arrowUp` (metres) in `Hitbloq.json`. The panel has Pool / Global-Near / Refresh / Playlist buttons.
+## Leaderboard switch arrows (like the PC mod)
+On a Hitbloq-ranked map a `>` arrow appears on the right of the leaderboard. It shows the Hitbloq panel over the leaderboard; a `<` arrow on the left switches back. The leaderboard's position is found at runtime. If the arrows float too high/low/wide, change `arrowUp` / `arrowSide` (metres) in `Hitbloq.json`.
 
-## Playlists
-- **Mods menu (left of the main menu) -> Hitbloq Playlists**: lists every Hitbloq pool, 6 per page. Tap 1-6 to save that pool's playlist, `<` `>` change page.
-- **Playlist** button on the panel: saves the playlist of the currently selected pool.
-Playlists are saved to PlaylistManager's folder as `Hitbloq_<pool>.bplist`. Restart the game, then use PlaylistManager's download icon on the playlist to fetch the missing songs.
+## Pool browser (Mods menu)
+Left of the main menu -> **Hitbloq**. Pick a pool with 1-6 (`<` `>` change page), `Sort` cycles Popularity / Name / Ranked maps, and **GO TO PLAYLIST!** saves the selected pool's playlist to PlaylistManager's folder as `Hitbloq_<pool>.bplist`. Restart the game, then use PlaylistManager's download icon to fetch the missing songs. The **Playlist** button on the panel does the same for the pool of the selected map.
+
+## Troubleshooting
+Logs are written by Paper to `/sdcard/ModData/com.beatgames.beatsaber/logs2/` (or use MBF's Logs button). Expected lines on startup: `late_load start`, `Mods menu entry registered`, `Hitbloq loaded`. When you pick a map: `level detail refreshed`, `panel created`, `leaderboard at ...`.

@@ -511,7 +511,7 @@ static const char* DiffName(int d) {
 }
 
 // BeatmapKey member names differ between codegen versions ("levelId" vs "___levelId"); accept both.
-template <class K> static void FillKey(const K& k, std::string& levelId, int& diff, std::string& chara) {
+template <class K> static void FillKey(K k, std::string& levelId, int& diff, std::string& chara) {
     if constexpr (requires { k.___levelId; }) levelId = Std(k.___levelId);
     else if constexpr (requires { k.levelId; }) levelId = Std(k.levelId);
     if constexpr (requires { k.___difficulty; }) diff = static_cast<int>(k.___difficulty);

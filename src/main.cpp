@@ -19,6 +19,7 @@
 #include "GlobalNamespace/BeatmapCharacteristicSO.hpp"
 #include "UnityEngine/GameObject.hpp"
 #include "UnityEngine/UI/Button.hpp"
+#include "HMUI/ViewController.hpp"
 #include "UnityEngine/Transform.hpp"
 #include "UnityEngine/MonoBehaviour.hpp"
 #include "UnityEngine/Networking/UnityWebRequest.hpp"
@@ -111,6 +112,7 @@ static struct Config {
     std::string url = "https://hitbloq.com";
     // where the panel appears (world space). The panel has a grab handle, but these let you fix a bad default without rebuilding.
     float posX = 2.45f, posY = 1.55f, posZ = 2.75f, rotY = 30.0f;
+    float arrowUp = 0.80f; // how far above the leaderboard centre the switch arrow sits (metres)
     // PlaylistManager loads playlists from here
     std::string playlistDir = "/sdcard/ModData/com.beatgames.beatsaber/Mods/PlaylistManager/Playlists";
 } cfg;
@@ -129,6 +131,7 @@ static void LoadConfig() {
             cfg.posY = (float)Num(d, "posY", cfg.posY);
             cfg.posZ = (float)Num(d, "posZ", cfg.posZ);
             cfg.rotY = (float)Num(d, "rotY", cfg.rotY);
+            cfg.arrowUp = (float)Num(d, "arrowUp", cfg.arrowUp);
             cfg.playlistDir = Str(d, "playlistDir", cfg.playlistDir);
         }
     }
@@ -136,7 +139,7 @@ static void LoadConfig() {
     std::string out = "{\n  \"playerId\": \"" + cfg.playerId + "\",\n  \"accountType\": \"" + cfg.accountType +
                       "\",\n  \"url\": \"" + cfg.url + "\",\n  \"posX\": " + std::to_string(cfg.posX) +
                       ",\n  \"posY\": " + std::to_string(cfg.posY) + ",\n  \"posZ\": " + std::to_string(cfg.posZ) +
-                      ",\n  \"rotY\": " + std::to_string(cfg.rotY) + ",\n  \"playlistDir\": \"" + cfg.playlistDir + "\"\n}\n";
+                      ",\n  \"rotY\": " + std::to_string(cfg.rotY) + ",\n  \"arrowUp\": " + std::to_string(cfg.arrowUp) + ",\n  \"playlistDir\": \"" + cfg.playlistDir + "\"\n}\n";
     std::ofstream o(CONFIG_PATH);
     if (o) o << out;
 }
@@ -254,14 +257,15 @@ static std::string StripTags(const std::string& s) {
 }
 static std::string CurPool() { return S.pools.empty() ? "" : S.pools[S.poolIdx].first; }
 
-// ---- playlist browser state
+// ---- playlist browser state (shown as a page in the left-hand Mods menu)
 static constexpr int POOLS_PER_PAGE = 6;
 static struct Browser {
-    bool open = false, loading = false, loaded = false, downloading = false;
+    bool loading = false, loaded = false, downloading = false;
     std::vector<std::pair<std::string, std::string>> pools; // id, shown name
     int page = 0;
+    std::string status;
 } B;
-static std::vector<SafePtrUnity<UnityEngine::GameObject>> browseBtns;
+static SafePtrUnity<TMPro::TextMeshProUGUI> pageHeader, pageList, pageStatus;
 
 static std::string Trunc(const std::string& s, size_t max) { // UTF-8 safe
     if (s.size() <= max) return s;
@@ -271,26 +275,23 @@ static std::string Trunc(const std::string& s, size_t max) { // UTF-8 safe
 }
 static int PageCount() { return std::max(1, ((int)B.pools.size() + POOLS_PER_PAGE - 1) / POOLS_PER_PAGE); }
 
-static void ApplyBrowseVisibility() {
-    for (auto& b : browseBtns) if (b) b->SetActive(B.open);
+static void DrawPage() {
+    if (!pageHeader || !pageList || !pageStatus) return;
+    pageHeader->set_text(SW("<b><color=#ffd42a>Hitbloq playlists</color></b>   page " + std::to_string(B.page + 1) + "/" + std::to_string(PageCount())));
+    std::string list;
+    if (B.loading) list = "<color=#aaaaaa>Loading pools...</color>";
+    else if (B.pools.empty()) list = "<color=#aaaaaa>No pools loaded. Reopen this page to retry.</color>";
+    else for (int i = 0; i < POOLS_PER_PAGE; i++) {
+        int idx = B.page * POOLS_PER_PAGE + i;
+        if (idx >= (int)B.pools.size()) break;
+        list += "<pos=0%><color=#ffd42a>" + std::to_string(i + 1) + "</color><pos=7%>" + Trunc(StripTags(B.pools[idx].second), 38) + "\n";
+    }
+    pageList->set_text(SW(list));
+    pageStatus->set_text(SW(B.status));
 }
 
 static void Draw() {
-    if (headerText && rankText && statusText && boardText && B.open) {
-        headerText->set_text(SW("<b><color=#ffd42a>Hitbloq</color></b>   playlists (page " + std::to_string(B.page + 1) + "/" + std::to_string(PageCount()) + ")"));
-        rankText->set_text(SW("<color=#aaaaaa>Tap a number to save that pool's playlist</color>"));
-        statusText->set_text(SW(S.status));
-        std::string list;
-        if (B.loading) list = "<color=#aaaaaa>Loading pools...</color>";
-        else if (B.pools.empty()) list = "<color=#aaaaaa>No pools loaded. Press Browse again to retry.</color>";
-        else for (int i = 0; i < POOLS_PER_PAGE; i++) {
-            int idx = B.page * POOLS_PER_PAGE + i;
-            if (idx >= (int)B.pools.size()) break;
-            list += "<pos=0%><color=#ffd42a>" + std::to_string(i + 1) + "</color><pos=7%>" + Trunc(StripTags(B.pools[idx].second), 38) + "\n";
-        }
-        boardText->set_text(SW(list));
-        return;
-    }
+    DrawPage();
     if (!headerText || !rankText || !statusText || !boardText) return;
     std::string h = "<b><color=#ffd42a>Hitbloq</color></b>";
     if (!S.pools.empty()) h += "   pool: <color=#aa6eff>" + CurPool() + "</color> (" + Fmt(S.pools[S.poolIdx].second) + " stars)";
@@ -319,10 +320,10 @@ static std::string SafeFileName(const std::string& in) {
 
 // Saves the pool's playlist where PlaylistManager picks it up. PlaylistManager then offers to download the missing songs.
 static void DownloadPlaylist(const std::string& poolId, const std::string& shownName) {
-    if (poolId.empty()) { S.status = "<color=red>No pool selected.</color>"; Draw(); return; }
+    if (poolId.empty()) { S.status = B.status = "<color=red>No pool selected.</color>"; Draw(); return; }
     if (B.downloading) return;
     B.downloading = true;
-    S.status = "Downloading playlist...";
+    S.status = B.status = "Downloading playlist...";
     Draw();
     Http(cfg.url + "/static/hashlists/" + UrlEncode(poolId) + ".bplist", [poolId, shownName](long code, std::string body) {
         B.downloading = false;
@@ -330,7 +331,7 @@ static void DownloadPlaylist(const std::string& poolId, const std::string& shown
         auto songs = ParseJson(body, d) && d.IsObject() ? Mem(d, "songs") : nullptr;
         if (code < 200 || code >= 300 || !songs || !songs->IsArray()) {
             LOG("playlist download failed for {} (http {}, {} bytes)", poolId, code, body.size());
-            S.status = "<color=red>Could not download that playlist.</color>";
+            S.status = B.status = "<color=red>Could not download that playlist.</color>";
             Draw(); return;
         }
         MkDirs(cfg.playlistDir);
@@ -339,12 +340,12 @@ static void DownloadPlaylist(const std::string& poolId, const std::string& shown
         if (o) o.write(body.data(), (std::streamsize)body.size());
         if (!o) {
             LOG("could not write {}", path);
-            S.status = "<color=red>Could not save the playlist file.</color>";
+            S.status = B.status = "<color=red>Could not save the playlist file.</color>";
             Draw(); return;
         }
         o.close();
         LOG("saved playlist {} ({} maps) to {}", poolId, (int)songs->Size(), path);
-        S.status = "<color=green>Saved " + Trunc(StripTags(shownName), 24) + " (" + std::to_string((int)songs->Size()) +
+        S.status = B.status = "<color=green>Saved " + Trunc(StripTags(shownName), 24) + " (" + std::to_string((int)songs->Size()) +
                    " maps). Restart the game, then open PlaylistManager.</color>";
         Draw();
     });
@@ -387,21 +388,13 @@ static void LoadPools() {
         B.loading = false;
         if (out.empty()) {
             LOG("pool list empty (http {}, {} bytes)", code, body.size());
-            S.status = "<color=red>Could not load the pool list.</color>";
+            B.status = "<color=red>Could not load the pool list.</color>";
         } else {
-            B.pools = std::move(out); B.loaded = true; B.page = 0; S.status.clear();
+            B.pools = std::move(out); B.loaded = true; B.page = 0; B.status.clear();
             LOG("loaded {} pools", (int)B.pools.size());
         }
         Draw();
     });
-}
-
-static void SetBrowse(bool open) {
-    B.open = open;
-    S.status.clear();
-    ApplyBrowseVisibility();
-    if (open && !B.loaded) LoadPools();
-    Draw();
 }
 
 // ------------------------------------------------------------------ user / registration
@@ -616,12 +609,72 @@ static void Refresh() {
 }
 
 // ------------------------------------------------------------------ UI
+// ---- where the real leaderboard is (found at runtime so the panel/arrow line up with it)
+struct LbPoseT { float p[3] = {0, 0, 0}, f[3] = {0, 0, 1}, u[3] = {0, 1, 0}; UnityEngine::Quaternion rot{}; bool ok = false; };
+static LbPoseT lbPose;
+static bool panelOpen = false; // true = Hitbloq panel is shown instead of the normal leaderboard
+static SafePtrUnity<BSML::FloatingScreen> arrowScreen;
+static SafePtrUnity<UnityEngine::GameObject> arrowOpenBtn, arrowCloseBtn;
+
+static UnityEngine::Transform* FindLeaderboardTransform() {
+    auto k = il2cpp_utils::GetClassFromName("", "PlatformLeaderboardViewController");
+    auto rk = il2cpp_utils::GetClassFromName("UnityEngine", "Resources");
+    if (!k || !rk) return nullptr;
+    auto m = il2cpp_functions::class_get_method_from_name(rk, "FindObjectsOfTypeAll", 1);
+    if (!m) return nullptr;
+    void* args[] = {il2cpp_functions::type_get_object(il2cpp_functions::class_get_type(k))};
+    Il2CppException* ex = nullptr;
+    auto arr = reinterpret_cast<Il2CppArray*>(il2cpp_functions::runtime_invoke(m, nullptr, args, &ex));
+    if (ex || !arr || arr->max_length < 1) return nullptr;
+    auto items = reinterpret_cast<Il2CppObject**>(reinterpret_cast<char*>(arr) + 32); // 64-bit Il2CppArray header
+    Il2CppObject* pick = items[0];
+    for (int i = 0; i < (int)arr->max_length; i++) { // prefer the instance that is actually in the scene
+        auto go = Invoke(items[i], "get_gameObject");
+        if (go && UnboxBool(Invoke(go, "get_activeInHierarchy"))) { pick = items[i]; break; }
+    }
+    return reinterpret_cast<UnityEngine::Transform*>(Invoke(pick, "get_transform"));
+}
+
+static void RefreshPose() {
+    lbPose.ok = false;
+    auto tr = FindLeaderboardTransform();
+    if (!tr) { LOG("leaderboard view not found, using config position"); return; }
+    auto p = tr->get_position(); auto f = tr->get_forward(); auto u = tr->get_up();
+    lbPose.p[0] = p.x; lbPose.p[1] = p.y; lbPose.p[2] = p.z;
+    lbPose.f[0] = f.x; lbPose.f[1] = f.y; lbPose.f[2] = f.z;
+    lbPose.u[0] = u.x; lbPose.u[1] = u.y; lbPose.u[2] = u.z;
+    lbPose.rot = tr->get_rotation();
+    lbPose.ok = true;
+    LOG("leaderboard at ({}, {}, {})", p.x, p.y, p.z);
+}
+
+// toward = metres towards the viewer, up = metres above the leaderboard centre
+static void Place(UnityEngine::Transform* tr, float toward, float up) {
+    if (!tr) return;
+    if (!lbPose.ok) { // fallback: config position
+        tr->set_position({cfg.posX, cfg.posY + up, cfg.posZ - toward});
+        return;
+    }
+    tr->set_position({lbPose.p[0] - lbPose.f[0] * toward + lbPose.u[0] * up,
+                      lbPose.p[1] - lbPose.f[1] * toward + lbPose.u[1] * up,
+                      lbPose.p[2] - lbPose.f[2] * toward + lbPose.u[2] * up});
+    tr->set_rotation(lbPose.rot);
+}
+static void PlaceScreens() {
+    if (screen) Place(screen->get_transform(), 0.08f, 0.0f);
+    if (arrowScreen) Place(arrowScreen->get_transform(), 0.08f, cfg.arrowUp);
+}
+
+static void ApplyPanelMode() {
+    if (arrowOpenBtn) arrowOpenBtn->SetActive(!panelOpen);
+    if (arrowCloseBtn) arrowCloseBtn->SetActive(panelOpen);
+}
+
 static void BuildUI() {
     if (screen) return;
     int gen = ++uiGen;
-    browseBtns.clear();
-    screen = BSML::Lite::CreateFloatingScreen({96.0f, 84.0f}, {cfg.posX, cfg.posY, cfg.posZ}, {0.0f, cfg.rotY, 0.0f}, 0.0f, true);
-    LOG("panel created at ({}, {}, {}) rotY {}", cfg.posX, cfg.posY, cfg.posZ, cfg.rotY);
+    screen = BSML::Lite::CreateFloatingScreen({96.0f, 66.0f}, {cfg.posX, cfg.posY, cfg.posZ}, {0.0f, cfg.rotY, 0.0f}, 0.0f, true);
+    LOG("panel created");
     auto t = screen->get_transform();
     auto mk = [&](float y, float h, float size, int align) {
         auto tx = BSML::Lite::CreateText(t, "", {0.0f, y}, {90.0f, h});
@@ -632,55 +685,82 @@ static void BuildUI() {
         return tx;
     };
     // TMP alignment ints: 514 = Center, 257 = TopLeft
-    headerText = mk(36.0f, 8.0f, 4.0f, 514);
-    rankText   = mk(29.0f, 6.0f, 3.2f, 514);
-    boardText  = mk(3.0f, 44.0f, 2.9f, 257);
-    statusText = mk(-23.0f, 6.0f, 2.6f, 514);
-
-    // browse row (only visible while browsing pools): < 1 2 3 4 5 6 >
-    auto addBrowse = [&](const char* label, float x, std::function<void()> cb) {
-        auto b = BSML::Lite::CreateUIButton(t, label, {x, -30.0f}, {10.5f, 8.0f}, cb);
-        browseBtns.emplace_back(b->get_gameObject());
-    };
-    addBrowse("<", -40.0f, []() { if (B.page > 0) { B.page--; Draw(); } });
-    for (int n = 0; n < POOLS_PER_PAGE; n++)
-        addBrowse(std::to_string(n + 1).c_str(), -40.0f + 11.43f * (n + 1), [n]() {
-            int i = B.page * POOLS_PER_PAGE + n;
-            if (i < (int)B.pools.size()) DownloadPlaylist(B.pools[i].first, B.pools[i].second);
-        });
-    addBrowse(">", -40.0f + 11.43f * 7, []() { if (B.page + 1 < PageCount()) { B.page++; Draw(); } });
-
-    // main row
-    BSML::Lite::CreateUIButton(t, "Pool", {-38.0f, -38.0f}, {18.0f, 8.0f}, []() {
-        if (B.open || S.pools.size() < 2) return;
+    headerText = mk(28.0f, 8.0f, 4.0f, 514);
+    rankText   = mk(21.0f, 6.0f, 3.2f, 514);
+    boardText  = mk(-1.0f, 40.0f, 2.9f, 257);
+    statusText = mk(-22.0f, 6.0f, 2.6f, 514);
+    BSML::Lite::CreateUIButton(t, "Pool", {-36.0f, -29.0f}, {22.0f, 8.0f}, []() {
+        if (S.pools.size() < 2) return;
         S.poolIdx = (S.poolIdx + 1) % (int)S.pools.size();
         Draw(); ReloadAll();
     });
-    BSML::Lite::CreateUIButton(t, "Global/Near", {-19.0f, -38.0f}, {18.0f, 8.0f}, []() {
-        if (B.open) return;
+    BSML::Lite::CreateUIButton(t, "Global/Near", {-12.0f, -29.0f}, {22.0f, 8.0f}, []() {
         S.around = !S.around;
         LoadBoard(++S.version);
     });
-    BSML::Lite::CreateUIButton(t, "Refresh", {0.0f, -38.0f}, {18.0f, 8.0f}, []() { if (!B.open) Refresh(); });
-    BSML::Lite::CreateUIButton(t, "Playlist", {19.0f, -38.0f}, {18.0f, 8.0f}, []() {
-        // same as the PC mod: grab the playlist of the pool that is currently selected
-        if (B.open) return;
-        DownloadPlaylist(CurPool(), CurPool());
+    BSML::Lite::CreateUIButton(t, "Refresh", {12.0f, -29.0f}, {22.0f, 8.0f}, []() { Refresh(); });
+    BSML::Lite::CreateUIButton(t, "Playlist", {36.0f, -29.0f}, {22.0f, 8.0f}, []() {
+        DownloadPlaylist(CurPool(), CurPool()); // same as the PC mod: playlist of the selected pool
     });
-    BSML::Lite::CreateUIButton(t, "Browse", {38.0f, -38.0f}, {18.0f, 8.0f}, []() { SetBrowse(!B.open); });
-    ApplyBrowseVisibility();
 
-    // show the panel only while the level detail view is on screen
+    // the switch arrow that sits above the leaderboard, like the PC mod
+    arrowScreen = BSML::Lite::CreateFloatingScreen({40.0f, 10.0f}, {cfg.posX, cfg.posY + cfg.arrowUp, cfg.posZ}, {0.0f, cfg.rotY, 0.0f}, 0.0f, true);
+    auto at = arrowScreen->get_transform();
+    auto ob = BSML::Lite::CreateUIButton(at, "Hitbloq  >", {0.0f, 0.0f}, {36.0f, 8.0f}, []() {
+        panelOpen = true; ApplyPanelMode();
+    });
+    auto cb = BSML::Lite::CreateUIButton(at, "<  Leaderboard", {0.0f, 0.0f}, {36.0f, 8.0f}, []() {
+        panelOpen = false; ApplyPanelMode();
+    });
+    arrowOpenBtn = ob->get_gameObject();
+    arrowCloseBtn = cb->get_gameObject();
+    ApplyPanelMode();
+
+    // visibility: both only while the level detail view is on screen; the panel only while switched to Hitbloq
     auto poll = std::make_shared<std::function<void()>>();
-    auto lastVis = std::make_shared<int>(-1);
-    *poll = [poll, gen, lastVis]() {
+    auto last = std::make_shared<int>(-1);
+    *poll = [poll, gen, last]() {
         if (!screen || gen != uiGen) return;
-        bool vis = detailView && detailView->get_gameObject()->get_activeInHierarchy();
-        if (*lastVis != (int)vis) { *lastVis = (int)vis; LOG("panel visible: {}", vis); }
-        screen->get_gameObject()->SetActive(vis);
+        bool detail = detailView && detailView->get_gameObject()->get_activeInHierarchy();
+        bool showArrow = detail && (panelOpen || !S.pools.empty());
+        bool showPanel = detail && panelOpen;
+        int state = (int)detail * 4 + (int)showArrow * 2 + (int)showPanel;
+        if (*last != state) { *last = state; LOG("detail view {}, arrow {}, panel {}", detail, showArrow, showPanel); }
+        screen->get_gameObject()->SetActive(showPanel);
+        if (arrowScreen) arrowScreen->get_gameObject()->SetActive(showArrow);
         BSML::MainThreadScheduler::ScheduleAfterTime(0.4f, *poll);
     };
     (*poll)();
+}
+
+// ------------------------------------------------------------------ playlist page in the left-hand Mods menu
+static void PlaylistPageDidActivate(HMUI::ViewController* self, bool firstActivation, bool addedToHierarchy, bool screenSystemEnabling) {
+    if (firstActivation) {
+        auto t = self->get_transform();
+        auto mk = [&](float y, float h, float size, int align) {
+            auto tx = BSML::Lite::CreateText(t, "", {0.0f, y}, {84.0f, h});
+            tx->set_fontSize(size);
+            tx->set_alignment(static_cast<TMPro::TextAlignmentOptions>(align));
+            tx->set_richText(true);
+            tx->set_enableWordWrapping(false);
+            return tx;
+        };
+        pageHeader = mk(28.0f, 8.0f, 4.0f, 514);
+        pageList   = mk(-2.0f, 44.0f, 3.2f, 257);
+        pageStatus = mk(-26.0f, 6.0f, 2.6f, 514);
+        float x0 = -35.0f, dx = 10.0f;
+        BSML::Lite::CreateUIButton(t, "<", {x0, -33.0f}, {9.0f, 8.0f}, []() { if (B.page > 0) { B.page--; Draw(); } });
+        static const char* numLabels[] = {"1", "2", "3", "4", "5", "6"};
+        for (int n = 0; n < POOLS_PER_PAGE; n++)
+            BSML::Lite::CreateUIButton(t, numLabels[n], {x0 + dx * (n + 1), -33.0f}, {9.0f, 8.0f}, [n]() {
+                int i = B.page * POOLS_PER_PAGE + n;
+                if (i < (int)B.pools.size()) DownloadPlaylist(B.pools[i].first, B.pools[i].second);
+            });
+        BSML::Lite::CreateUIButton(t, ">", {x0 + dx * (POOLS_PER_PAGE + 1), -33.0f}, {9.0f, 8.0f}, []() { if (B.page + 1 < PageCount()) { B.page++; Draw(); } });
+    }
+    B.status.clear();
+    if (!B.loaded) LoadPools(); // also retries after a failed load
+    Draw();
 }
 
 // ------------------------------------------------------------------ map selection
@@ -738,6 +818,8 @@ MAKE_HOOK(RefreshContentHook, nullptr, void, Il2CppObject* self) {
     if (!self) return;
     detailView = reinterpret_cast<UnityEngine::MonoBehaviour*>(self);
     BuildUI();
+    RefreshPose();
+    PlaceScreens();
     OnMapSelected(self);
 }
 
@@ -799,6 +881,7 @@ extern "C" __attribute__((visibility("default"))) void late_load() noexcept {
     BSML::Init();
     LoadConfig();
     if (!cfg.playerId.empty()) S.platformId = cfg.playerId;
+    BSML::Register::RegisterMainMenuViewControllerMethod("Hitbloq Playlists", "Hitbloq Playlists", "Download Hitbloq map pool playlists", PlaylistPageDidActivate);
 
     HookByName("StandardLevelDetailView", "RefreshContent", 0, "map panel",
                [](void* p) { INSTALL_HOOK_DIRECT(Logger, RefreshContentHook, p); });

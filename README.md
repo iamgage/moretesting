@@ -11,14 +11,17 @@ Or locally: `qpm restore && qpm s qmod`.
 - `playerId`: your BeatLeader/ScoreSaber id. Leave empty to auto-detect from the Meta account.
 - `accountType`: `auto` (default, same as the PC mod: ScoreSaber if its mod is installed, otherwise BeatLeader; the other one is used as a fallback), `scoresaber`, or `beatleader`. Only matters for registering a new Hitbloq account.
 
-- `posX`, `posY`, `posZ`, `rotY`: where the panel appears (defaults put it on the right, where the vanilla leaderboard sits). You can also grab its handle in game.
+- `posX`, `posY`, `posZ`, `rotY`: fallback position used only if the real leaderboard can't be found. `arrowUp`: height of the switch arrow above the leaderboard.
 - `playlistDir`: where playlists are saved (default is PlaylistManager's folder).
 
 ## Use
 Select a map. The Hitbloq panel appears (grab the handle to move it). Buttons: Pool / Global-Around Me / Refresh.
 After a cleared run the score is refreshed automatically (BeatLeader or ScoreSaber must upload it first).
 
+## Leaderboard switch arrow
+When a map is ranked on Hitbloq, a `Hitbloq >` arrow appears above the leaderboard (its position is found at runtime). Press it to show the Hitbloq panel over the leaderboard, and `< Leaderboard` to go back. If it floats too high or low, change `arrowUp` (metres) in `Hitbloq.json`. The panel has Pool / Global-Near / Refresh / Playlist buttons.
+
 ## Playlists
-- **Playlist** button: saves the playlist of the currently selected pool.
-- **Browse** button: lists every Hitbloq pool (6 per page). Tap 1-6 to save that pool's playlist, `<` `>` change page.
+- **Mods menu (left of the main menu) -> Hitbloq Playlists**: lists every Hitbloq pool, 6 per page. Tap 1-6 to save that pool's playlist, `<` `>` change page.
+- **Playlist** button on the panel: saves the playlist of the currently selected pool.
 Playlists are saved to PlaylistManager's folder as `Hitbloq_<pool>.bplist`. Restart the game, then use PlaylistManager's download icon on the playlist to fetch the missing songs.

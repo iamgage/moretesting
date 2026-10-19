@@ -23,13 +23,13 @@
 #include "UnityEngine/Networking/UnityWebRequest.hpp"
 #include "UnityEngine/Networking/UnityWebRequestAsyncOperation.hpp"
 #include "UnityEngine/Networking/DownloadHandler.hpp"
-#include "UnityEngine/WWWForm.hpp"
 #include "TMPro/TextMeshProUGUI.hpp"
 #include "TMPro/TextAlignmentOptions.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
+#include <cstring>
 #include <dirent.h>
 #include <fstream>
 #include <functional>
@@ -130,15 +130,63 @@ static void LoadConfig() {
 
 // ------------------------------------------------------------------ http (UnityWebRequest, polled on the main thread)
 using HttpCb = std::function<void(long, std::string)>;
+
+// Build a POST request purely through il2cpp reflection (UnityWebRequest.Post / WWWForm are not in this game's metadata).
+static Il2CppObject* NewObject(const char* ns, const char* name, int argc, const char* paramHint, std::vector<void*> args) {
+    auto k = il2cpp_utils::GetClassFromName(ns, name);
+    if (!k) return nullptr;
+    const MethodInfo* ctor = nullptr;
+    void* iter = nullptr;
+    while (auto m = il2cpp_functions::class_get_methods(k, &iter)) {
+        if (std::string(il2cpp_functions::method_get_name(m)) != ".ctor" || (int)il2cpp_functions::method_get_param_count(m) != argc) continue;
+        if (paramHint && argc > 0) {
+            std::string tn = il2cpp_functions::type_get_name(il2cpp_functions::method_get_param(m, 0));
+            if (tn.find(paramHint) == std::string::npos) continue;
+        }
+        ctor = m; break;
+    }
+    if (!ctor) return nullptr;
+    auto o = il2cpp_functions::object_new(k);
+    Il2CppException* ex = nullptr;
+    il2cpp_functions::runtime_invoke(ctor, o, args.empty() ? nullptr : args.data(), &ex);
+    return ex ? nullptr : o;
+}
+static bool CallMethod(Il2CppObject* o, const char* name, std::vector<void*> args) {
+    auto m = il2cpp_functions::class_get_method_from_name(o->klass, name, (int)args.size());
+    if (!m) return false;
+    Il2CppException* ex = nullptr;
+    il2cpp_functions::runtime_invoke(m, o, args.empty() ? nullptr : args.data(), &ex);
+    return !ex;
+}
+static std::string UrlEncode(const std::string& in) {
+    static const char* hex = "0123456789ABCDEF";
+    std::string o;
+    for (unsigned char c : in) {
+        if (isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') o += (char)c;
+        else { o += '%'; o += hex[c >> 4]; o += hex[c & 15]; }
+    }
+    return o;
+}
+static UnityEngine::Networking::UnityWebRequest* MakePost(const std::string& url, const std::string& body) {
+    auto str = [](const std::string& x) { return (void*)il2cpp_functions::string_new(x.c_str()); };
+    auto req = NewObject("UnityEngine.Networking", "UnityWebRequest", 2, "String", {str(url), str("POST")});
+    auto byteK = il2cpp_utils::GetClassFromName("System", "Byte");
+    if (!req || !byteK) return nullptr;
+    auto arr = il2cpp_functions::array_new(byteK, body.size());
+    std::memcpy(reinterpret_cast<char*>(arr) + 32, body.data(), body.size()); // 64-bit Il2CppArray: header 16 + bounds 8 + length 8
+    auto up = NewObject("UnityEngine.Networking", "UploadHandlerRaw", 1, "Byte[]", {arr});
+    auto dl = NewObject("UnityEngine.Networking", "DownloadHandlerBuffer", 0, nullptr, {});
+    if (!up || !dl) return nullptr;
+    CallMethod(req, "set_uploadHandler", {up});
+    CallMethod(req, "set_downloadHandler", {dl});
+    CallMethod(req, "SetRequestHeader", {str("Content-Type"), str("application/x-www-form-urlencoded")});
+    return reinterpret_cast<UnityEngine::Networking::UnityWebRequest*>(req);
+}
+
 static void Http(const std::string& url, HttpCb cb, std::optional<std::pair<std::string, std::string>> form = std::nullopt) {
     UnityEngine::Networking::UnityWebRequest* req = nullptr;
-    if (form) {
-        auto f = UnityEngine::WWWForm::New_ctor();
-        f->AddField(SW(form->first), SW(form->second));
-        req = UnityEngine::Networking::UnityWebRequest::Post(SW(url), f);
-    } else {
-        req = UnityEngine::Networking::UnityWebRequest::Get(SW(url));
-    }
+    if (form) req = MakePost(url, form->first + "=" + UrlEncode(form->second));
+    else req = UnityEngine::Networking::UnityWebRequest::Get(SW(url));
     if (!req) { cb(0, ""); return; }
     req->set_timeout(15);
     auto op = req->SendWebRequest();
@@ -468,7 +516,7 @@ template <class K> static void FillKey(const K& k, std::string& levelId, int& di
     else if constexpr (requires { k.levelId; }) levelId = Std(k.levelId);
     if constexpr (requires { k.___difficulty; }) diff = static_cast<int>(k.___difficulty);
     else if constexpr (requires { k.difficulty; }) diff = static_cast<int>(k.difficulty);
-    auto fillChar = [&](auto* c) { if (c) chara = Std(c->get_serializedName()); };
+    auto fillChar = [&](auto&& c) { if (c) chara = Std(c->get_serializedName()); };
     if constexpr (requires { k.___beatmapCharacteristic; }) fillChar(k.___beatmapCharacteristic);
     else if constexpr (requires { k.beatmapCharacteristic; }) fillChar(k.beatmapCharacteristic);
 }

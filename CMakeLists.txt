@@ -1,6 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
 
-# qpm restore generates qpm_defines.cmake / extern.cmake; defaults keep a manual configure working too
 include(qpm_defines.cmake OPTIONAL)
 if(NOT DEFINED MOD_ID)
   set(MOD_ID "hitbloq")
@@ -29,4 +28,11 @@ add_library(${COMPILE_ID} SHARED ${cpp_file_list})
 target_include_directories(${COMPILE_ID} PRIVATE src)
 
 include(extern.cmake)
-target_link_libraries(${COMPILE_ID} PRIVATE -llog)
+
+# Link every shared library qpm downloaded (includes libsl2.so, which provides A64HookFunction)
+file(GLOB EXTERN_SOS ${CMAKE_CURRENT_SOURCE_DIR}/extern/libs/*.so)
+message(STATUS "extern libs: ${EXTERN_SOS}")
+target_link_libraries(${COMPILE_ID} PRIVATE ${EXTERN_SOS} -llog)
+
+# Safety net: symbols provided by the modloader at runtime may stay unresolved at link time
+target_link_options(${COMPILE_ID} PRIVATE -Wl,-z,undefs)

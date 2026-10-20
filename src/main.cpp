@@ -45,6 +45,14 @@
 static constexpr auto Logger = Paper::ConstLoggerContext("Hitbloq");
 #define LOG(...) Paper::Logger::fmtLog<Paper::LogLevel::INF>(__VA_ARGS__)
 
+// Plain text breadcrumbs next to the config, so you can see how far the mod got without any log tools:
+// /sdcard/ModData/com.beatgames.beatsaber/Configs/Hitbloq.log.txt
+static void Crumb(const std::string& msg, bool reset = false) {
+    mkdir("/sdcard/ModData/com.beatgames.beatsaber/Configs", 0777);
+    std::ofstream o("/sdcard/ModData/com.beatgames.beatsaber/Configs/Hitbloq.log.txt", reset ? std::ios::trunc : std::ios::app);
+    if (o) o << msg << "\n";
+}
+
 static modloader::ModInfo modInfo{MOD_ID, VERSION, 0};
 
 // ------------------------------------------------------------------ small helpers
@@ -798,6 +806,7 @@ static void BuildUI() {
     int gen = ++uiGen;
     screen = BSML::Lite::CreateFloatingScreen({96.0f, 76.0f}, {cfg.posX, cfg.posY, cfg.posZ}, {0.0f, cfg.rotY, 0.0f}, 0.0f, true);
     LOG("panel created");
+    Crumb("9 panel + arrows built");
     auto t = screen->get_transform();
     auto mk = [&](float y, float h, float size, int align) {
         auto tx = BSML::Lite::CreateText(t, "", {0.0f, y}, {90.0f, h});
@@ -959,6 +968,8 @@ MAKE_HOOK(RefreshContentHook, nullptr, void, Il2CppObject* self) {
     RefreshContentHook(self);
     if (!self) return;
     LOG("level detail refreshed");
+    static bool firstRefresh = true;
+    if (firstRefresh) { firstRefresh = false; Crumb("8 song detail view refreshed (hook is firing)"); }
     detailView = reinterpret_cast<UnityEngine::MonoBehaviour*>(self);
     BuildUI();
     RefreshPose();
@@ -1006,10 +1017,11 @@ MAKE_HOOK(GetUserInfoHook, nullptr, Il2CppObject*, Il2CppObject* self, void* tok
 
 static bool HookByName(const char* klass, const char* method, int argc, const char* label, void (*install)(void*)) {
     auto k = il2cpp_utils::GetClassFromName("", klass);
-    if (!k) { LOG("class {} not found, {} disabled", klass, label); return false; }
+    if (!k) { LOG("class {} not found, {} disabled", klass, label); Crumb(std::string("HOOK FAILED, class not found: ") + klass + " (" + label + ")"); return false; }
     auto m = il2cpp_functions::class_get_method_from_name(k, method, argc);
-    if (!m || !m->methodPointer) { LOG("{}.{} not found, {} disabled", klass, method, label); return false; }
+    if (!m || !m->methodPointer) { LOG("{}.{} not found, {} disabled", klass, method, label); Crumb(std::string("HOOK FAILED, method not found: ") + klass + "." + method + " (" + label + ")"); return false; }
     install(reinterpret_cast<void*>(m->methodPointer));
+    Crumb(std::string("hook installed: ") + klass + "." + method + " (" + label + ")");
     return true;
 }
 
@@ -1017,18 +1029,24 @@ static bool HookByName(const char* klass, const char* method, int argc, const ch
 extern "C" __attribute__((visibility("default"))) void setup(CModInfo* info) noexcept {
     *info = modInfo.to_c();
     Paper::Logger::RegisterFileContextId("Hitbloq");
+    Crumb("1 setup() ran (v" VERSION ")", true);
 }
 
 extern "C" __attribute__((visibility("default"))) void late_load() noexcept {
     LOG("late_load start (v" VERSION ")");
+    Crumb("2 late_load() started");
     il2cpp_functions::Init();
+    Crumb("3 il2cpp ready");
     BSML::Init();
+    Crumb("4 BSML::Init done");
     LoadConfig();
+    Crumb("5 config loaded");
     LOG("config loaded, player id '{}'", cfg.playerId);
     wantHitbloq = cfg.autoOpen;
     if (!cfg.playerId.empty()) S.platformId = cfg.playerId;
     BSML::Register::RegisterMainMenuViewControllerMethod("Hitbloq", "Hitbloq", "Hitbloq map pools and playlists", PlaylistPageDidActivate);
     LOG("Mods menu entry registered");
+    Crumb("6 Mods menu entry registered (look for Hitbloq in the Mods menu)");
 
     HookByName("StandardLevelDetailView", "RefreshContent", 0, "map panel",
                [](void* p) { INSTALL_HOOK_DIRECT(Logger, RefreshContentHook, p); });
@@ -1042,4 +1060,5 @@ extern "C" __attribute__((visibility("default"))) void late_load() noexcept {
                                       [](void* p) { INSTALL_HOOK_DIRECT(Logger, GetUserInfoHook, p); });
     if (!idHooked) LOG("player id auto-detect unavailable: set playerId in Hitbloq.json");
     LOG("Hitbloq loaded (v" VERSION ")");
+    Crumb("7 late_load finished (v" VERSION ")");
 }

@@ -33,5 +33,8 @@ The panel has three tabs on top: **Hitbloq / BeatLeader / ScoreSaber**. BeatLead
 - Opens automatically on ranked maps (`autoOpen`), and re-finds the real leaderboard position whenever the view changes instead of only once.
 - Column header row, and clearer error messages. More log lines: `map info: http .. pools`, `board loaded for pool ..`.
 
+## Did the mod run? (no log tools needed)
+The mod writes `/sdcard/ModData/com.beatgames.beatsaber/Configs/Hitbloq.log.txt` (open it with the Quest Files app). Lines are numbered 1-9 as it starts up. No file = the game never ran the mod (it was installed but the library failed to load). Stops at a number = that step is where it breaks. A `HOOK FAILED` line says which game class/method wasn't found. The GitHub Action also prints a "symbols the mod needs that nothing provides" check; it should say `(none)`.
+
 ## Troubleshooting
 Logs are written by Paper to `/sdcard/ModData/com.beatgames.beatsaber/logs2/` (or use MBF's Logs button). Expected lines on startup: `late_load start`, `Mods menu entry registered`, `Hitbloq loaded`. When you pick a map: `level detail refreshed`, `panel created`, `leaderboard at ...`.

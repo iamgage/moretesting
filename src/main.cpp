@@ -67,6 +67,7 @@ static const JV* Mem(const JV& v, const char* k) { return (v.IsObject() && v.Has
 static double Num(const JV& v, const char* k, double def = 0) { auto m = Mem(v, k); return (m && m->IsNumber()) ? m->GetDouble() : def; }
 static int Int(const JV& v, const char* k, int def = -1) { auto m = Mem(v, k); return (m && m->IsNumber()) ? (int)m->GetDouble() : def; }
 static std::string Str(const JV& v, const char* k, const std::string& def = "") { auto m = Mem(v, k); return (m && m->IsString()) ? m->GetString() : def; }
+static bool BoolOr(const JV& v, const char* k, bool def) { auto m = Mem(v, k); return (m && m->IsBool()) ? m->GetBool() : def; }
 
 // ---- il2cpp reflection helpers
 static Il2CppObject* Invoke(Il2CppObject* o, const char* method) {
@@ -116,6 +117,7 @@ static struct Config {
     float arrowSide = 0.95f; // how far left/right of the leaderboard centre they sit (metres)
     // PlaylistManager loads playlists from here
     std::string playlistDir = "/sdcard/ModData/com.beatgames.beatsaber/Mods/PlaylistManager/Playlists";
+    bool autoOpen = true;    // show the Hitbloq leaderboard automatically on Hitbloq-ranked maps (the < arrow goes back to the normal one)
 } cfg;
 
 static void LoadConfig() {
@@ -135,13 +137,14 @@ static void LoadConfig() {
             cfg.arrowUp = (float)Num(d, "arrowUp", cfg.arrowUp);
             cfg.arrowSide = (float)Num(d, "arrowSide", cfg.arrowSide);
             cfg.playlistDir = Str(d, "playlistDir", cfg.playlistDir);
+            cfg.autoOpen = BoolOr(d, "autoOpen", cfg.autoOpen);
         }
     }
     while (!cfg.url.empty() && cfg.url.back() == '/') cfg.url.pop_back();
     std::string out = "{\n  \"playerId\": \"" + cfg.playerId + "\",\n  \"accountType\": \"" + cfg.accountType +
                       "\",\n  \"url\": \"" + cfg.url + "\",\n  \"posX\": " + std::to_string(cfg.posX) +
                       ",\n  \"posY\": " + std::to_string(cfg.posY) + ",\n  \"posZ\": " + std::to_string(cfg.posZ) +
-                      ",\n  \"rotY\": " + std::to_string(cfg.rotY) + ",\n  \"arrowUp\": " + std::to_string(cfg.arrowUp) + ",\n  \"arrowSide\": " + std::to_string(cfg.arrowSide) + ",\n  \"playlistDir\": \"" + cfg.playlistDir + "\"\n}\n";
+                      ",\n  \"rotY\": " + std::to_string(cfg.rotY) + ",\n  \"arrowUp\": " + std::to_string(cfg.arrowUp) + ",\n  \"arrowSide\": " + std::to_string(cfg.arrowSide) + ",\n  \"playlistDir\": \"" + cfg.playlistDir + "\",\n  \"autoOpen\": " + (cfg.autoOpen ? "true" : "false") + "\n}\n";
     std::ofstream o(CONFIG_PATH);
     if (o) o << out;
 }
@@ -244,6 +247,10 @@ static struct State {
     std::string status, rankLine, board;
     bool lastPlayedRanked = false;
     bool refreshing = false;
+    int source = 0;                  // leaderboard shown in the panel: 0 Hitbloq, 1 BeatLeader, 2 ScoreSaber
+    bool custom = false;             // selected map is a custom map (BeatLeader / ScoreSaber can show it)
+    std::string hash, chara;         // map hash and characteristic ("Standard", ...)
+    int diffIdx = 4;                 // 0 Easy .. 4 ExpertPlus
 } S;
 
 static SafePtrUnity<BSML::FloatingScreen> screen;
@@ -310,11 +317,15 @@ static void DrawPage() {
 static void Draw() {
     DrawPage();
     if (!headerText || !rankText || !statusText || !boardText) return;
-    std::string h = "<b><color=#ffd42a>Hitbloq</color></b>";
-    if (!S.pools.empty()) h += "   pool: <color=#aa6eff>" + CurPool() + "</color> (" + Fmt(S.pools[S.poolIdx].second) + " stars)";
-    else h += "   <color=#aaaaaa>map not ranked on any pool</color>";
+    std::string h;
+    if (S.source == 0) {
+        h = "<b><color=#ffd42a>Hitbloq</color></b>";
+        if (!S.pools.empty()) h += "   pool: <color=#aa6eff>" + CurPool() + "</color> (" + Fmt(S.pools[S.poolIdx].second) + " stars)";
+        else h += "   <color=#aaaaaa>map not ranked on any pool</color>";
+    } else if (S.source == 1) h = "<b><color=#ff4d6d>BeatLeader</color></b>   <color=#aaaaaa>global top scores</color>";
+    else h = "<b><color=#ffd42a>ScoreSaber</color></b>   <color=#aaaaaa>global top scores</color>";
     headerText->set_text(SW(h));
-    rankText->set_text(SW(S.rankLine));
+    rankText->set_text(SW(S.source == 0 ? S.rankLine : std::string()));
     statusText->set_text(SW(S.status));
     boardText->set_text(SW(S.board));
 }
@@ -560,8 +571,57 @@ static void LoadRank(int ver) {
     });
 }
 
-static void LoadBoard(int ver) {
-    if (S.mapStr.empty() || S.pools.empty()) { S.board.clear(); Draw(); return; }
+static const char* DiffName(int d);
+static std::string LowerS(std::string x) { std::transform(x.begin(), x.end(), x.begin(), [](unsigned char c) { return std::tolower(c); }); return x; }
+static std::string UpperS(std::string x) { std::transform(x.begin(), x.end(), x.begin(), [](unsigned char c) { return std::toupper(c); }); return x; }
+static std::string Commas(double v) {
+    std::string n = std::to_string((long long)v), o;
+    int c = 0;
+    for (int i = (int)n.size() - 1; i >= 0; i--) { o.insert(o.begin(), n[i]); if (++c % 3 == 0 && i > 0 && n[i - 1] != '-') o.insert(o.begin(), ','); }
+    return o;
+}
+
+// BeatLeader / ScoreSaber top scores for the selected custom map (public endpoints, no account needed)
+static void LoadExternalBoard(int ver) {
+    if (!S.custom) { S.board.clear(); Draw(); return; }
+    bool bl = S.source == 1;
+    std::string url = bl ? "https://api.beatleader.xyz/v3/scores/" + LowerS(S.hash) + "/" + DiffName(S.diffIdx) + "/" + S.chara + "/general/global/page?page=1&count=10"
+                         : "https://scoresaber.com/api/leaderboard/by-hash/" + UpperS(S.hash) + "/scores?difficulty=" + std::to_string(S.diffIdx * 2 + 1) +
+                           "&gameMode=Solo" + S.chara + "&page=1";
+    S.board = "<color=#aaaaaa>Loading...</color>"; Draw();
+    Http(url, [ver, bl](long code, std::string body) {
+        if (ver != S.version || (S.source == 1) != bl) return;
+        rapidjson::Document d;
+        std::string out;
+        bool ok = ParseJson(body, d);
+        const JV* arr = ok && d.IsObject() ? Mem(d, bl ? "data" : "scores") : nullptr;
+        LOG("{} board: http {}, {} bytes, rows {}", bl ? "BeatLeader" : "ScoreSaber", code, body.size(), arr && arr->IsArray() ? (int)arr->Size() : -1);
+        if (arr && arr->IsArray()) {
+            int n = 0;
+            for (auto& e : arr->GetArray()) {
+                if (++n > 10) break;
+                auto pl = Mem(e, bl ? "player" : "leaderboardPlayerInfo");
+                std::string name = pl ? StripTags(Str(*pl, "name", "?")) : "?";
+                if (name.size() > 22) name = name.substr(0, 22);
+                bool me = pl && !S.platformId.empty() && Str(*pl, "id") == S.platformId;
+                double pp = Num(e, "pp");
+                std::string c3, c4 = pp > 0 ? Fmt(pp) + "pp" : "-";
+                if (bl) { double acc = Num(e, "accuracy"); c3 = Fmt(acc <= 1.0001 ? acc * 100.0 : acc) + "%"; }
+                else c3 = Commas(Num(e, "modifiedScore", Num(e, "baseScore")));
+                out += std::string(me ? "<color=#00ff88>" : "") + "<pos=0%>#" + std::to_string(Int(e, "rank", n)) + "<pos=11%>" + name +
+                       "<pos=58%><color=#ffd42a>" + c3 + "</color><pos=80%><color=#aa6eff>" + c4 + "</color>" + (me ? "</color>" : "") + "\n";
+            }
+        }
+        if (out.empty()) S.board = (code < 200 || code >= 300) ? (code == 404 ? "<color=#aaaaaa>No scores yet (or map not on this leaderboard).</color>" : "<color=#ff6666>Could not load this leaderboard.</color>")
+                                                             : "<color=#aaaaaa>No scores yet.</color>";
+        else S.board = std::string("<size=80%><color=#888888><pos=0%>#<pos=11%>PLAYER<pos=58%>") + (bl ? "ACC" : "SCORE") + "<pos=80%>PP</color></size>\n" + out;
+        Draw();
+    });
+}
+
+static void LoadHitbloqBoard(int ver) {
+    if (S.mapStr.empty()) { S.board.clear(); Draw(); return; }
+    if (S.pools.empty()) { S.board = "<color=#aaaaaa>Not ranked on Hitbloq.\nUse the BeatLeader / ScoreSaber tabs above.</color>"; Draw(); return; }
     std::string url;
     if (S.around) {
         if (!S.registered) { S.board = "<color=#aaaaaa>Not registered yet.</color>"; Draw(); return; }
@@ -569,11 +629,13 @@ static void LoadBoard(int ver) {
     } else url = cfg.url + "/api/leaderboard/" + S.mapStr + "/scores_extended/0";
     S.board = "<color=#aaaaaa>Loading...</color>"; Draw();
     std::string pool = CurPool();
-    Http(url, [ver, pool](long, std::string body) {
+    Http(url, [ver, pool](long code, std::string body) {
         if (ver != S.version) return;
         rapidjson::Document d;
         std::string out;
-        if (ParseJson(body, d) && d.IsArray()) {
+        bool ok = ParseJson(body, d) && d.IsArray();
+        LOG("board loaded for pool {}: http {}, {} bytes, parsed {}", pool, code, body.size(), ok);
+        if (ok) {
             int n = 0;
             for (auto& e : d.GetArray()) {
                 auto cr = Mem(e, "cr");
@@ -590,17 +652,29 @@ static void LoadBoard(int ver) {
                        Fmt((*cr)[pool.c_str()].GetDouble()) + "cr</color>" + (me ? "</color>" : "") + "\n";
             }
         }
-        S.board = out.empty() ? "<color=#aaaaaa>No scores yet.</color>" : out;
+        if (out.empty()) S.board = (code < 200 || code >= 300) ? "<color=#ff6666>Could not load the leaderboard.</color>" : "<color=#aaaaaa>No scores yet.</color>";
+        else S.board = "<size=80%><color=#888888><pos=0%>#<pos=11%>PLAYER<pos=62%>ACC<pos=80%>CR</color></size>\n" + out;
         Draw();
     });
+}
+
+static void LoadBoard(int ver) {
+    if (S.source == 0) LoadHitbloqBoard(ver);
+    else LoadExternalBoard(ver);
 }
 
 static void LoadForCurrentMap() {
     if (S.pools.empty()) return;
     int ver = S.version;
+    // The global leaderboard is public: show it right away, whether or not we know who the player is.
+    if (S.source == 0) LoadBoard(ver);
     auto go = [ver]() { if (ver == S.version) { LoadRank(ver); LoadBoard(ver); } };
-    if (S.registered) go();
-    else if (!S.registering) CheckRegistered(go);
+    if (S.registered) { LoadRank(ver); return; }
+    if (S.platformId.empty()) {
+        S.rankLine = "<color=#aaaaaa>Not linked: set playerId in Hitbloq.json</color>";
+        Draw(); return;
+    }
+    if (!S.registering) CheckRegistered(go);
 }
 
 static void ReloadAll() {
@@ -661,25 +735,30 @@ static void Refresh() {
 struct LbPoseT { float p[3] = {0, 0, 0}, f[3] = {0, 0, 1}, u[3] = {0, 1, 0}, r[3] = {1, 0, 0}; UnityEngine::Quaternion rot{}; bool ok = false; };
 static LbPoseT lbPose;
 static bool panelOpen = false; // true = Hitbloq panel is shown instead of the normal leaderboard
+static bool wantHitbloq = true; // last choice made with the arrows (like LeaderboardCore remembers the selected leaderboard)
 static SafePtrUnity<BSML::FloatingScreen> arrowR, arrowL;
 
 static UnityEngine::Transform* FindLeaderboardTransform() {
-    auto k = il2cpp_utils::GetClassFromName("", "PlatformLeaderboardViewController");
     auto rk = il2cpp_utils::GetClassFromName("UnityEngine", "Resources");
-    if (!k || !rk) return nullptr;
+    if (!rk) return nullptr;
     auto m = il2cpp_functions::class_get_method_from_name(rk, "FindObjectsOfTypeAll", 1);
     if (!m) return nullptr;
-    void* args[] = {il2cpp_functions::type_get_object(il2cpp_functions::class_get_type(k))};
-    Il2CppException* ex = nullptr;
-    auto arr = reinterpret_cast<Il2CppArray*>(il2cpp_functions::runtime_invoke(m, nullptr, args, &ex));
-    if (ex || !arr || arr->max_length < 1) return nullptr;
-    auto items = reinterpret_cast<Il2CppObject**>(reinterpret_cast<char*>(arr) + 32); // 64-bit Il2CppArray header
-    Il2CppObject* pick = items[0];
-    for (int i = 0; i < (int)arr->max_length; i++) { // prefer the instance that is actually in the scene
-        auto go = Invoke(items[i], "get_gameObject");
-        if (go && UnboxBool(Invoke(go, "get_activeInHierarchy"))) { pick = items[i]; break; }
+    for (auto name : {"PlatformLeaderboardViewController", "LeaderboardViewController"}) {
+        auto k = il2cpp_utils::GetClassFromName("", name);
+        if (!k) continue;
+        void* args[] = {il2cpp_functions::type_get_object(il2cpp_functions::class_get_type(k))};
+        Il2CppException* ex = nullptr;
+        auto arr = reinterpret_cast<Il2CppArray*>(il2cpp_functions::runtime_invoke(m, nullptr, args, &ex));
+        if (ex || !arr || arr->max_length < 1) continue;
+        auto items = reinterpret_cast<Il2CppObject**>(reinterpret_cast<char*>(arr) + 32); // 64-bit Il2CppArray header
+        for (int i = 0; i < (int)arr->max_length; i++) { // only the instance that is actually on screen
+            auto go = Invoke(items[i], "get_gameObject");
+            if (go && UnboxBool(Invoke(go, "get_activeInHierarchy"))) {
+                if (auto tr = reinterpret_cast<UnityEngine::Transform*>(Invoke(items[i], "get_transform"))) return tr;
+            }
+        }
     }
-    return reinterpret_cast<UnityEngine::Transform*>(Invoke(pick, "get_transform"));
+    return nullptr;
 }
 
 static void RefreshPose() {
@@ -717,7 +796,7 @@ static void PlaceScreens() {
 static void BuildUI() {
     if (screen) return;
     int gen = ++uiGen;
-    screen = BSML::Lite::CreateFloatingScreen({96.0f, 66.0f}, {cfg.posX, cfg.posY, cfg.posZ}, {0.0f, cfg.rotY, 0.0f}, 0.0f, true);
+    screen = BSML::Lite::CreateFloatingScreen({96.0f, 76.0f}, {cfg.posX, cfg.posY, cfg.posZ}, {0.0f, cfg.rotY, 0.0f}, 0.0f, true);
     LOG("panel created");
     auto t = screen->get_transform();
     auto mk = [&](float y, float h, float size, int align) {
@@ -729,29 +808,34 @@ static void BuildUI() {
         return tx;
     };
     // TMP alignment ints: 514 = Center, 257 = TopLeft
-    headerText = mk(28.0f, 8.0f, 4.0f, 514);
-    rankText   = mk(21.0f, 6.0f, 3.2f, 514);
-    boardText  = mk(-1.0f, 40.0f, 2.9f, 257);
-    statusText = mk(-22.0f, 6.0f, 2.6f, 514);
-    BSML::Lite::CreateUIButton(t, "Pool", {-36.0f, -29.0f}, {22.0f, 8.0f}, []() {
+    headerText = mk(25.0f, 8.0f, 4.0f, 514);
+    rankText   = mk(18.5f, 6.0f, 3.2f, 514);
+    boardText  = mk(-5.0f, 40.0f, 2.9f, 257);
+    statusText = mk(-27.0f, 6.0f, 2.6f, 514);
+    // source tabs: Hitbloq / BeatLeader / ScoreSaber
+    auto pick = [](int src) { if (S.source == src) return; S.source = src; Draw(); ReloadAll(); };
+    BSML::Lite::CreateUIButton(t, "Hitbloq", {-32.0f, 33.0f}, {30.0f, 7.0f}, [pick]() { pick(0); });
+    BSML::Lite::CreateUIButton(t, "BeatLeader", {0.0f, 33.0f}, {30.0f, 7.0f}, [pick]() { pick(1); });
+    BSML::Lite::CreateUIButton(t, "ScoreSaber", {32.0f, 33.0f}, {30.0f, 7.0f}, [pick]() { pick(2); });
+    BSML::Lite::CreateUIButton(t, "Pool", {-36.0f, -33.0f}, {22.0f, 8.0f}, []() {
         if (S.pools.size() < 2) return;
         S.poolIdx = (S.poolIdx + 1) % (int)S.pools.size();
         Draw(); ReloadAll();
     });
-    BSML::Lite::CreateUIButton(t, "Global/Near", {-12.0f, -29.0f}, {22.0f, 8.0f}, []() {
+    BSML::Lite::CreateUIButton(t, "Global/Near", {-12.0f, -33.0f}, {22.0f, 8.0f}, []() {
         S.around = !S.around;
-        LoadBoard(++S.version);
+        ReloadAll();
     });
-    BSML::Lite::CreateUIButton(t, "Refresh", {12.0f, -29.0f}, {22.0f, 8.0f}, []() { Refresh(); });
-    BSML::Lite::CreateUIButton(t, "Playlist", {36.0f, -29.0f}, {22.0f, 8.0f}, []() {
+    BSML::Lite::CreateUIButton(t, "Refresh", {12.0f, -33.0f}, {22.0f, 8.0f}, []() { Refresh(); });
+    BSML::Lite::CreateUIButton(t, "Playlist", {36.0f, -33.0f}, {22.0f, 8.0f}, []() {
         DownloadPlaylist(CurPool(), CurPool()); // playlist of the selected pool
     });
 
     // the left/right switch arrows around the leaderboard, like the PC mod
     arrowR = BSML::Lite::CreateFloatingScreen({16.0f, 14.0f}, {cfg.posX + cfg.arrowSide, cfg.posY + cfg.arrowUp, cfg.posZ}, {0.0f, cfg.rotY, 0.0f}, 0.0f, true);
-    BSML::Lite::CreateUIButton(arrowR->get_transform(), ">", {0.0f, 0.0f}, {12.0f, 10.0f}, []() { panelOpen = true; });
+    BSML::Lite::CreateUIButton(arrowR->get_transform(), ">", {0.0f, 0.0f}, {12.0f, 10.0f}, []() { panelOpen = wantHitbloq = true; });
     arrowL = BSML::Lite::CreateFloatingScreen({16.0f, 14.0f}, {cfg.posX - cfg.arrowSide, cfg.posY + cfg.arrowUp, cfg.posZ}, {0.0f, cfg.rotY, 0.0f}, 0.0f, true);
-    BSML::Lite::CreateUIButton(arrowL->get_transform(), "<", {0.0f, 0.0f}, {12.0f, 10.0f}, []() { panelOpen = false; });
+    BSML::Lite::CreateUIButton(arrowL->get_transform(), "<", {0.0f, 0.0f}, {12.0f, 10.0f}, []() { panelOpen = false; wantHitbloq = false; });
 
     // visibility: only while the level detail view is on screen
     auto poll = std::make_shared<std::function<void()>>();
@@ -759,12 +843,18 @@ static void BuildUI() {
     *poll = [poll, gen, last]() {
         if (!screen || gen != uiGen) return;
         bool detail = detailView && detailView->get_gameObject()->get_activeInHierarchy();
-        bool ranked = !S.pools.empty();
+        bool ranked = S.custom;
         bool showR = detail && ranked && !panelOpen;
         bool showL = detail && panelOpen;
         bool showPanel = detail && panelOpen;
         int state = (int)detail * 8 + (int)showR * 4 + (int)showL * 2 + (int)showPanel;
-        if (*last != state) { *last = state; LOG("detail view {}, right arrow {}, left arrow {}, panel {}", detail, showR, showL, showPanel); }
+        if (*last != state) {
+            *last = state;
+            LOG("detail view {}, right arrow {}, left arrow {}, panel {}", detail, showR, showL, showPanel);
+            if (detail) { RefreshPose(); PlaceScreens(); }
+        } else if (detail && !lbPose.ok && (showR || showL || showPanel)) {
+            RefreshPose(); PlaceScreens(); // keep looking until the leaderboard is found
+        }
         screen->get_gameObject()->SetActive(showPanel);
         if (arrowR) arrowR->get_gameObject()->SetActive(showR);
         if (arrowL) arrowL->get_gameObject()->SetActive(showL);
@@ -837,12 +927,15 @@ static bool ReadKey(Il2CppObject* viewObj, std::string& levelId, int& diff, std:
 static void OnMapSelected(Il2CppObject* view) {
     std::string levelId, chara; int diff = 4;
     S.mapStr.clear(); S.pools.clear(); S.poolIdx = 0; S.rankLine.clear(); S.board.clear();
+    panelOpen = false;
+    S.custom = false;
     int ver = ++S.version;
     if (!ReadKey(view, levelId, diff, chara)) { LOG("could not read BeatmapKey"); Draw(); return; }
     if (levelId.rfind("custom_level_", 0) != 0 || chara.empty()) { Draw(); return; }
+    S.custom = true; S.hash = levelId.substr(13, 40); S.chara = chara; S.diffIdx = (diff >= 0 && diff < 5) ? diff : 4;
     S.mapStr = levelId.substr(13, 40) + "%7C_" + DiffName(diff) + "_Solo" + chara;
     S.status.clear(); Draw();
-    Http(cfg.url + "/api/leaderboard/" + S.mapStr + "/info", [ver](long, std::string body) {
+    Http(cfg.url + "/api/leaderboard/" + S.mapStr + "/info", [ver](long code, std::string body) {
         if (ver != S.version) return;
         rapidjson::Document d;
         if (ParseJson(body, d) && d.IsObject() && !Mem(d, "error")) {
@@ -852,8 +945,11 @@ static void OnMapSelected(Il2CppObject* view) {
                     if (m.value.IsNumber()) S.pools.emplace_back(m.name.GetString(), (float)m.value.GetDouble());
         }
         S.lastPlayedRanked = !S.pools.empty();
+        LOG("map info: http {}, {} pools", code, (int)S.pools.size());
+        if (!S.pools.empty() && cfg.autoOpen && wantHitbloq) panelOpen = true;
         Draw();
-        if (S.pools.empty()) return;
+        if (S.pools.empty()) { LoadBoard(ver); return; } // not on Hitbloq: shows the message, or BeatLeader/ScoreSaber scores
+        if (S.source != 0) LoadBoard(ver);
         LoadForCurrentMap();
     });
 }
@@ -929,6 +1025,7 @@ extern "C" __attribute__((visibility("default"))) void late_load() noexcept {
     BSML::Init();
     LoadConfig();
     LOG("config loaded, player id '{}'", cfg.playerId);
+    wantHitbloq = cfg.autoOpen;
     if (!cfg.playerId.empty()) S.platformId = cfg.playerId;
     BSML::Register::RegisterMainMenuViewControllerMethod("Hitbloq", "Hitbloq", "Hitbloq map pools and playlists", PlaylistPageDidActivate);
     LOG("Mods menu entry registered");
